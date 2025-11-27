@@ -7,6 +7,7 @@
         subLang: 'en'
     };
 
+    
     // 歌詞が存在しなかったことを記録する専用値
     const NO_LYRICS_SENTINEL = '__NO_LYRICS__';
 
