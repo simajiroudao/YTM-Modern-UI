@@ -110,10 +110,102 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
             });
     };
 
-    if (req.type === 'GET_LYRICS') {
-        const { track, artist, youtube_url } = req.payload;
+    // DynamicLyrics.json → LRC のためのヘルパー
+    const formatLrcTime = (seconds) => {
+        const total = Math.max(0, seconds);
+        const min = Math.floor(total / 60);
+        const sec = Math.floor(total - min * 60);
+        const cs  = Math.floor((total - min * 60 - sec) * 100);
+        const mm = String(min).padStart(2, '0');
+        const ss = String(sec).padStart(2, '0');
+        const cc = String(cs).padStart(2, '0');
+        return `${mm}:${ss}.${cc}`;
+    };
 
-        console.log('[BG] GET_LYRICS', { track, artist, youtube_url });
+    // ★ 1. DynamicLyrics.json があれば使う（1文字同期用）
+    const fetchFromGithubDynamic = (video_id) => {
+        if (!video_id) return Promise.resolve(null);
+        const url = `https://raw.githubusercontent.com/LRCHub/${video_id}/main/DynamicLyrics.json`;
+        console.log('[BG] DynamicLyrics URL:', url);
+
+        return fetch(url)
+            .then(r => r.ok ? r.json() : Promise.reject(r.statusText))
+            .then(json => {
+                if (!json || !Array.isArray(json.lines)) return null;
+
+                const lrcLines = json.lines.map(line => {
+                    let ms = null;
+                    if (typeof line.startTimeMs === 'number') {
+                        ms = line.startTimeMs;
+                    } else if (typeof line.startTimeMs === 'string') {
+                        const n = Number(line.startTimeMs);
+                        if (!Number.isNaN(n)) ms = n;
+                    }
+                    if (ms == null) return null;
+
+                    let text = typeof line.text === 'string' && line.text.length
+                        ? line.text
+                        : (Array.isArray(line.chars) ? line.chars.map(c => c.c).join('') : '');
+
+                    text = (text || '').trim();
+                    if (!text) return null;
+
+                    const timeSec = ms / 1000;
+                    return `[${formatLrcTime(timeSec)}] ${text}`;
+                }).filter(Boolean);
+
+                const lrc = lrcLines.join('\n');
+                console.log('[BG] DynamicLyrics converted LRC length:', lrc.length);
+                return {
+                    lyrics: lrc,
+                    dynamicLines: json.lines || []
+                };
+            })
+            .catch(err => {
+                console.warn('[BG] DynamicLyrics error:', err);
+                return null;
+            });
+    };
+
+    // ★ 2. DynamicLyrics.json が無いとき用：README.md から LRC を読む
+    const fetchFromGithubReadme = (video_id) => {
+        if (!video_id) return Promise.resolve('');
+        const url = `https://raw.githubusercontent.com/LRCHub/${video_id}/main/README.md`;
+        console.log('[BG] README URL:', url);
+
+        return fetch(url)
+            .then(r => r.ok ? r.text() : Promise.reject(r.statusText))
+            .then(text => {
+                if (!text) return '';
+
+                // ``` ～ ``` の中に LRC がある想定（なければ全文から探す）
+                let candidate = '';
+                const fenceMatch = text.match(/```(?:lrc|text)?([\s\S]*?)```/i);
+                if (fenceMatch && fenceMatch[1]) {
+                    candidate = fenceMatch[1];
+                } else {
+                    candidate = text;
+                }
+
+                // LRC っぽいタグがなければ無視
+                if (!/\[\d{2}:\d{2}\.\d{2,3}\]/.test(candidate)) {
+                    return '';
+                }
+
+                const cleaned = candidate.trim();
+                console.log('[BG] README LRC length:', cleaned.length);
+                return cleaned;
+            })
+            .catch(err => {
+                console.warn('[BG] README fetch error:', err);
+                return '';
+            });
+    };
+
+    if (req.type === 'GET_LYRICS') {
+        const { track, artist, youtube_url, video_id } = req.payload;
+
+        console.log('[BG] GET_LYRICS', { track, artist, youtube_url, video_id });
 
         const fetchFromLrchub = () => {
             return fetch('https://lrchub.coreone.work/api/lyrics', {
@@ -144,18 +236,62 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
             });
         };
 
-        fetchFromLrchub()
-            .then(lrchubLyrics => {
-                if (lrchubLyrics) {
-                    console.log('[BG] Using LRCHub lyrics');
-                    return lrchubLyrics;
+        // ★ まず DynamicLyrics.json を試す
+        const startPromise = video_id
+            ? fetchFromGithubDynamic(video_id)
+            : Promise.resolve(null);
+
+        startPromise
+            .then(githubRes => {
+                if (githubRes && githubRes.lyrics) {
+                    console.log('[BG] Using GitHub DynamicLyrics');
+                    sendResponse({
+                        success: true,
+                        lyrics: githubRes.lyrics,
+                        dynamicLines: githubRes.dynamicLines || null
+                    });
+                    // ここで終わり
+                    return null;
                 }
-                console.log('[BG] Fallback to LrcLib');
-                return fetchFromLrcLib(track, artist);
+
+                // ★ DynamicLyrics.json が無かった場合：
+                //   1. README.md を読む
+                //   2. それもなければ LRCHub → LrcLib の順で従来通り
+                console.log('[BG] No DynamicLyrics, try README.md');
+
+                const readmePromise = video_id
+                    ? fetchFromGithubReadme(video_id)
+                    : Promise.resolve('');
+
+                return readmePromise.then(readmeLyrics => {
+                    if (readmeLyrics && readmeLyrics.trim()) {
+                        console.log('[BG] Using README.md lyrics');
+                        return { lyrics: readmeLyrics };
+                    }
+
+                    console.log('[BG] README empty, try LRCHub');
+                    return fetchFromLrchub()
+                        .then(lrchubLyrics => {
+                            if (lrchubLyrics && lrchubLyrics.trim()) {
+                                return { lyrics: lrchubLyrics };
+                            }
+                            console.log('[BG] LRCHub empty, fallback to LrcLib');
+                            return fetchFromLrcLib(track, artist)
+                                .then(lrclibLyrics => ({ lyrics: lrclibLyrics || '' }));
+                        });
+                });
             })
-            .then(finalLyrics => {
-                console.log('[BG] Final lyrics source length:', finalLyrics ? finalLyrics.length : 0);
-                sendResponse({ success: !!finalLyrics, lyrics: finalLyrics || '' });
+            .then(finalRes => {
+                // DynamicLyrics ルートで sendResponse 済みなら何もしない
+                if (!finalRes) return;
+
+                const ok = !!(finalRes.lyrics && finalRes.lyrics.trim());
+                sendResponse({
+                    success: ok,
+                    lyrics: finalRes.lyrics || '',
+                    // README / LRCHub / LrcLib の場合は 1行単位表示（今まで通り）
+                    dynamicLines: null
+                });
             })
             .catch(err => {
                 console.error("Lyrics API Error:", err);

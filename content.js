@@ -10,6 +10,11 @@
     let currentKey = null;
     let lyricsData = [];
     let hasTimestamp = false;
+    let dynamicLines = null; // ★ DynamicLyrics.json の lines を保持
+    let lastActiveIndex = -1;     // いまアクティブな行インデックス
+    let lastTimeForChars = -1;    // 直前に処理した currentTime
+    let lyricRafId = null;        // requestAnimationFrame のID
+
 
     const ui = {
         bg: null, wrapper: null,
@@ -281,7 +286,8 @@
                     alert('動画IDが取得できませんでした。YouTube Music の再生画面で実行してください。');
                     return;
                 }
-                const githubUrl = `https://github.com/LRCHub/${vid}/edit/main/README.md`;
+                // DynamicLyrics.json 直接編集
+                const githubUrl = `https://github.com/LRCHub/${vid}/edit/main/DynamicLyrics.json`;
                 window.open(githubUrl, '_blank');
             }
         });
@@ -345,6 +351,7 @@
                     storage.remove(currentKey);
                     currentKey = null;
                     lyricsData = [];
+                    dynamicLines = null;
                     renderLyrics([]);
                 }
                 toggleDialog(false);
@@ -567,6 +574,7 @@
         if (currentKey !== key) {
             currentKey = key;
             updateMetaUI(meta);
+            dynamicLines = null; // 曲が変わったらクリア
             loadLyrics(meta);
         }
     };
@@ -734,58 +742,94 @@
     }
 
     async function loadLyrics(meta) {
-        if (!config.deepLKey) config.deepLKey = await storage.get('ytm_deepl_key');
-        const cachedTrans = await storage.get('ytm_trans_enabled');
-        if (cachedTrans !== null && cachedTrans !== undefined) config.useTrans = cachedTrans;
-        const mainLangStored = await storage.get('ytm_main_lang');
-        const subLangStored  = await storage.get('ytm_sub_lang');
-        if (mainLangStored) config.mainLang = mainLangStored;
-        if (subLangStored !== null && subLangStored !== undefined) config.subLang = subLangStored;
+    if (!config.deepLKey) config.deepLKey = await storage.get('ytm_deepl_key');
+    const cachedTrans = await storage.get('ytm_trans_enabled');
+    if (cachedTrans !== null && cachedTrans !== undefined) config.useTrans = cachedTrans;
+    const mainLangStored = await storage.get('ytm_main_lang');
+    const subLangStored  = await storage.get('ytm_sub_lang');
+    if (mainLangStored) config.mainLang = mainLangStored;
+    if (subLangStored !== null && subLangStored !== undefined) config.subLang = subLangStored;
 
-        let data = await storage.get(currentKey);
+    // ★★ ここから修正パート ★★
+    let cached = await storage.get(currentKey);
+    dynamicLines = null;
 
-        if (!data) {
-            try {
-                const track = meta.title.replace(/\s*[\(-\[].*?[\)-]].*/, "");
-                const artist = meta.artist;
-                const youtube_url = getCurrentVideoUrl();
+    let data = null;
 
-                const res = await new Promise(resolve => {
-                    chrome.runtime.sendMessage(
-                        { type: 'GET_LYRICS', payload: { track, artist, youtube_url } },
-                        resolve
-                    );
-                });
-
-                console.log('[CS] GET_LYRICS response:', res);
-
-                if (res?.success) {
-                    data = res.lyrics || '';
-                    if (data) storage.set(currentKey, data);
-                } else {
-                    console.warn('Lyrics API failed:', res?.error);
-                }
-            } catch (e) {
-                console.warn('Lyrics API fetch failed', e);
+    if (cached) {
+        if (typeof cached === 'string') {
+            // 旧形式（歌詞だけ文字列） or ローカルアップロード
+            data = cached;
+            dynamicLines = null;
+        } else if (typeof cached === 'object') {
+            // 新形式 { lyrics, dynamicLines }
+            data = cached.lyrics || '';
+            if (Array.isArray(cached.dynamicLines)) {
+                dynamicLines = cached.dynamicLines;
             }
         }
-
-        if (!data) {
-            renderLyrics([]);
-            return;
-        }
-
-        let parsed = parseBaseLRC(data);
-        const videoUrl = getCurrentVideoUrl();
-        let finalLines = parsed;
-
-        if (config.useTrans) {
-            finalLines = await applyTranslations(parsed, videoUrl);
-        }
-
-        lyricsData = finalLines;
-        renderLyrics(finalLines);
     }
+
+    if (!data) {
+        try {
+            const track = meta.title.replace(/\s*[\(-\[].*?[\)-]].*/, "");
+            const artist = meta.artist;
+            const youtube_url = getCurrentVideoUrl();
+            const video_id = getCurrentVideoId();
+
+            const res = await new Promise(resolve => {
+                chrome.runtime.sendMessage(
+                    { type: 'GET_LYRICS', payload: { track, artist, youtube_url, video_id } },
+                    resolve
+                );
+            });
+
+            console.log('[CS] GET_LYRICS response:', res);
+
+            if (res?.success) {
+                data = res.lyrics || '';
+
+                if (Array.isArray(res.dynamicLines) && res.dynamicLines.length) {
+                    dynamicLines = res.dynamicLines;
+                }
+
+                if (data) {
+                    // ★ DynamicLyrics がある場合は一緒にキャッシュする
+                    if (dynamicLines) {
+                        storage.set(currentKey, {
+                            lyrics: data,
+                            dynamicLines: dynamicLines
+                        });
+                    } else {
+                        // 通常の LRC だけの場合は従来通り文字列で保存
+                        storage.set(currentKey, data);
+                    }
+                }
+            } else {
+                console.warn('Lyrics API failed:', res?.error);
+            }
+        } catch (e) {
+            console.warn('Lyrics API fetch failed', e);
+        }
+    }
+
+    if (!data) {
+        renderLyrics([]);
+        return;
+    }
+
+    let parsed = parseBaseLRC(data);
+    const videoUrl = getCurrentVideoUrl();
+    let finalLines = parsed;
+
+    if (config.useTrans) {
+        finalLines = await applyTranslations(parsed, videoUrl);
+    }
+
+    lyricsData = finalLines;
+    renderLyrics(finalLines);
+}
+
 
     function renderLyrics(data) {
         if (!ui.lyrics) return;
@@ -825,9 +869,28 @@
             return;
         }
 
-        data.forEach(line => {
+        data.forEach((line, index) => {
             const row = createEl('div', '', 'lyric-line');
-            const mainSpan = createEl('span', '', '', line.text);
+            const mainSpan = createEl('span', '', 'lyric-main');
+
+            const dyn = dynamicLines && dynamicLines[index];
+            if (dyn && Array.isArray(dyn.chars) && dyn.chars.length) {
+                // 文字ごとに span を作る
+                dyn.chars.forEach((ch, ci) => {
+                    const chSpan = createEl('span', '', 'lyric-char');
+                    chSpan.textContent = ch.c;
+                    chSpan.dataset.charIndex = String(ci);
+                    if (typeof ch.t === 'number') {
+                        chSpan.dataset.time = String(ch.t / 1000); // sec
+                    }
+                    // 最初は pending 状態にしておく（CSSで薄く表示など）
+                    chSpan.classList.add('char-pending');
+                    mainSpan.appendChild(chSpan);
+                });
+            } else {
+                mainSpan.textContent = line.text;
+            }
+
             row.appendChild(mainSpan);
 
             if (line.translation) {
@@ -857,12 +920,47 @@
         e.target.value = '';
     };
 
-    document.addEventListener('timeupdate', (e) => {
+     function startLyricRafLoop() {
+        if (lyricRafId !== null) return; // 多重起動防止
+
+        const loop = () => {
+            const v = document.querySelector('video');
+            if (!v || v.readyState === 0) {
+                lyricRafId = requestAnimationFrame(loop);
+                return;
+            }
+
+            // レイアウトが有効で、かつ再生中のみ
+            if (
+                document.body.classList.contains('ytm-custom-layout') &&
+                lyricsData.length &&
+                hasTimestamp &&
+                !v.paused &&
+                !v.ended
+            ) {
+                const t = v.currentTime;
+
+                // 無駄な処理を避けるため、時間が変わった時だけ更新
+                if (t !== lastTimeForChars) {
+                    lastTimeForChars = t;
+                    updateLyricHighlight(t);
+                }
+            }
+
+            lyricRafId = requestAnimationFrame(loop);
+        };
+
+        lyricRafId = requestAnimationFrame(loop);
+    }
+
+    // 拡張読み込み時に1回だけ起動
+    startLyricRafLoop();
+
+    function updateLyricHighlight(currentTime) {
         if (!document.body.classList.contains('ytm-custom-layout') || !lyricsData.length) return;
-        if (e.target.tagName !== 'VIDEO') return;
         if (!hasTimestamp) return;
 
-        const t = e.target.currentTime;
+        const t = currentTime;
         let idx = lyricsData.findIndex(l => l.time > t) - 1;
         if (idx < 0) idx = lyricsData[lyricsData.length - 1].time <= t ? lyricsData.length - 1 : -1;
 
@@ -871,26 +969,69 @@
         const isInterlude = current && next && (next.time - current.time > 10) && (t - current.time > 6);
 
         const rows = document.querySelectorAll('.lyric-line');
+
         rows.forEach((r, i) => {
             if (i === idx && !isInterlude) {
+                // ★ アクティブ行になった／継続中
+                const firstActivate = (i !== lastActiveIndex);
+
                 if (!r.classList.contains('active')) {
                     r.classList.add('active');
-                    if (r.classList.contains('has-translation')) {
-                        r.classList.add('show-translation');
-                    }
+                }
+                if (r.classList.contains('has-translation')) {
+                    r.classList.add('show-translation');
+                }
+
+                // 行が切り替わったタイミングでだけスクロール
+                if (firstActivate) {
                     r.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                } else {
-                    if (r.classList.contains('has-translation')) {
-                        r.classList.add('show-translation');
-                    }
+                }
+
+                // ★ 行の中の文字ごとの同期（ここも毎フレーム少しずつ）
+                if (dynamicLines && dynamicLines[i] && Array.isArray(dynamicLines[i].chars)) {
+                    const charSpans = r.querySelectorAll('.lyric-char');
+                    charSpans.forEach(sp => {
+                        const tt = parseFloat(sp.dataset.time || '0');
+                        if (!Number.isFinite(tt)) return;
+
+                        if (tt <= t) {
+                            if (!sp.classList.contains('char-active')) {
+                                sp.classList.add('char-active');
+                                sp.classList.remove('char-pending');
+                            }
+                        } else {
+                            if (!sp.classList.contains('char-pending')) {
+                                sp.classList.remove('char-active');
+                                sp.classList.add('char-pending');
+                            }
+                        }
+                    });
                 }
             } else {
+                // 非アクティブな行
                 r.classList.remove('active');
                 r.classList.remove('show-translation');
+
+                if (dynamicLines && dynamicLines[i]) {
+                    const charSpans = r.querySelectorAll('.lyric-char');
+                    charSpans.forEach(sp => {
+                        if (!sp.classList.contains('char-pending')) {
+                            sp.classList.remove('char-active');
+                            sp.classList.add('char-pending');
+                        }
+                    });
+                }
             }
         });
-    }, true);
 
+        lastActiveIndex = isInterlude ? -1 : idx;
+    }
+
+    // === 起動処理 ===
     console.log("YTM Immersion loaded.");
     setInterval(tick, 1000);
+
+    // 歌詞ハイライトの RAF ループ開始（1回だけ）
+    startLyricRafLoop();
 })();
+

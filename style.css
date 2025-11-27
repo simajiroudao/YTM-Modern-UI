@@ -348,3 +348,49 @@ body.ytm-custom-layout ytmusic-player-bar .content-info-wrapper { display: none 
 .ytm-confirm-btn.danger:hover {
     background: rgba(255, 61, 80, 1);
 }
+.lyric-char.char-pending {
+  opacity: 0.25;
+}
+
+.lyric-char.char-active {
+  opacity: 1;
+  text-shadow: 0 0 8px rgba(255,255,255,0.8);
+}
+/* 1文字ずつのベース */
+.lyric-char {
+  display: inline-block;
+  transition:
+    opacity 0.18s linear,
+    transform 0.18s ease-out,
+    text-shadow 0.18s ease-out;
+  will-change: opacity, transform;
+}
+
+/* まだ再生前の文字（薄く & 少し下げておく） */
+.lyric-char.char-pending {
+  opacity: 0.18;
+  transform: translateY(2px);
+}
+
+/* 再生済みの文字（クッキリ & 位置戻す） */
+.lyric-char.char-active {
+  opacity: 1;
+  transform: translateY(0);
+  text-shadow: 0 0 8px rgba(255,255,255,0.9);
+}
+
+/* 行のハイライトも少し滑らかに */
+.lyric-line {
+  transition: opacity 0.22s ease-out, transform 0.22s ease-out;
+}
+
+.lyric-line.active {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.lyric-line:not(.active) {
+  opacity: 0.6;
+}
+
+
