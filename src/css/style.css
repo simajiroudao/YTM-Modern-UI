@@ -7,8 +7,10 @@
   font-display: swap;
 }
 
-*{
+/* 全体のボックスサイズ計算を統一して、はみ出し事故を防ぐ */
+* {
   font-family: 'SF Pro Display', 'Inter', 'Noto Sans JP';
+  box-sizing: border-box;
 }
 
 /* === 既存レイアウト === */
@@ -152,6 +154,10 @@ body.ytm-custom-layout ytmusic-search-box {
 #my-lyrics-container { width: 500px; height: 65vh; overflow-y: auto; scrollbar-width: none; mask-image: linear-gradient(to bottom, transparent, black 15%, black 85%, transparent); }
 #my-lyrics-container::-webkit-scrollbar { display: none; }
 
+/* ★ 修正ポイント: 
+   Flexboxをやめ、単純なブロック配置に変更。
+   これで幅計算が狂わず、確実に折り返されます。
+*/
 .lyric-line {
   font-size: 32px;
   font-weight: 800;
@@ -163,12 +169,27 @@ body.ytm-custom-layout ytmusic-search-box {
   transform-origin: left;
   filter: blur(1px);
   transform: scale(0.95);
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
+  
+  /* Flexを廃止しBlockへ */
+  display: block;
+  width: 100%;
+  padding-right: 20px; /* 右側に余裕を持たせる */
+  
+  /* 強制折り返しのための最強設定 */
+  overflow-wrap: anywhere; 
+  word-break: break-all;
+  white-space: normal;
 }
+
 .lyric-line.empty-line {
     display: none;
+}
+
+/* ★ 歌詞テキスト本体 */
+.lyric-main {
+    display: block;
+    width: 100%;
+    line-height: 1.35;
 }
 
 .lyric-line.active {
@@ -177,6 +198,7 @@ body.ytm-custom-layout ytmusic-search-box {
   transform: scale(1.05);
   text-shadow: 0 0 30px rgba(255,255,255,0.5);
 }
+
 .lyric-translation {
   display: block;
   font-size: 0.55em;
@@ -205,7 +227,7 @@ body.ytm-custom-layout.ytm-has-timestamp .lyric-line.show-translation .lyric-tra
 
 /* ★ Apple Music 風：1文字ずつ光る演出 */
 body.ytm-custom-layout .lyric-line .lyric-char {
-    display: inline-block;
+    display: inline-block; /* アニメーションのためにinline-blockは維持 */
     transition:
         color 0.12s linear,
         transform 0.12s linear,
